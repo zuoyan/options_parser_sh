@@ -1,0 +1,69 @@
+#!/bin/bash
+
+if [[ -f $(dirname $(realpath $0))/options_parser.sh ]]; then
+  source $(dirname $(realpath $0))/options_parser.sh
+elif [[ -f $(dirname $0)/options_parser.sh ]]; then
+  source $(dirname $0)/options_parser.sh
+else
+  echo "no options_parser found ..." >&2
+  exit 13
+fi
+
+declare -a REGEXPS # filter
+declare -a REV_REGEXPS # filter out
+declare revision_range
+AUTHOR=${AUTHOR:-$USER}
+
+op_description="list the changed files by AUTHOR(default \$USER),
+filter/filter-out using regexps"
+
+OP_add_help
+
+OP_add_option "revision-range" "revision_range" "<revision range>\n
+Only check files changed in revsion range"
+
+OP_add_option "author" "AUTHOR" "NAME\nset author name"
+
+OP_add_option "regexp" "OP_take_append REGEXPS --" "REGEXP\nadd regexp
+to filter over commits"
+
+OP_add_option "rev-regexp" "OP_take_append REV_REGEXPS --" "REGEXP\nadd
+regexp to filter out over commits"
+
+OP_parse_all "$@"
+
+logs=$(git log --pretty=oneline --no-merges --author=$AUTHOR $revision_range | sed 's/ .*//')
+
+fn=$(mktemp)
+cfn=$(mktemp)
+declare -a fns
+for log in $logs; do
+  git show --name-only $log >$fn
+  sed -e '0,/^$/{d}' $fn | tac | sed -e '0,/^$/{d}' | tac > $cfn
+  mapfile -t cfns < <(
+    sed -e '0,/^$/{d}' $fn | tac | sed -n '0,/^$/{/./p}' | tac
+  )
+  do_log=1
+  for l_re in "${REGEXPS[@]}"; do
+    if !egrep -qe "$l_re" $cfn; then
+      do_log=0
+      break
+    fi
+  done
+  if test $do_log -eq 0; then continue; fi
+  for l_re in "${REV_REGEXPS[@]}"; do
+    if egrep -qe "$l_re" $cfn; then
+      do_log=0
+      break
+    fi
+  done
+  if test $do_log -eq 0; then continue; fi
+  fns+=("${cfns[@]}")
+done
+
+unlink $fn
+unlink $cfn
+
+(
+  for f in "${fns[@]}"; do echo $f; done
+) | sort -u
