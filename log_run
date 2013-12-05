@@ -56,6 +56,8 @@ function die {
 [[ -n "$job_file" ]] || die "no job file"
 [[ -n "$log_file" ]] || die "no log file"
 
+touch "$log_file" || die "touch log file '$log_file' failed"
+
 mapfile -t jobs <"$job_file"
 
 function log_status {
