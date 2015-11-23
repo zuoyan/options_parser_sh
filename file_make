@@ -1,0 +1,265 @@
+#!/bin/bash
+#
+# A simple make like bash script, to run commands based on file mtime.
+#
+# A naive example to compile a simple program:
+#
+#  --rule stats -- a.o b.o c.o -- gcc -o stats a.o b.o c.o --
+#  --rule a.o -- a.cc a.h -- gcc -c -o a.o a.cc --
+#  --rule b.o -- b.cc b.h a.h -- gcc -c -o b.o b.cc --
+#  --rule c.o -- c.cc c.h b.h a.h -- gcc -c -o c.o c.cc --
+#
+source options_parser.sh
+
+# RULES, encoded like OP_OPTIONS, with attributes :sources, :targets and
+# :commands.
+declare -a RULES=( 0 )
+
+# targets... -- sources... --SEP command... --SEP.
+function file_make::take_rule {
+  local OP_VALUE_ERROR
+  local -a OP_VALUES
+  local -a l_targets
+  local -a l_sources
+  local -a l_commands
+  OP::append_values l_targets OP::value_many OP::value non-option -- "$@" || return 1
+  OP::value -- "$@" # Eat the separator
+  OP::append_values l_sources OP::value_many OP::value non-option -- "$@" || return 1
+  OP::value -- "$@"
+  local l_sep=$OP_VALUE
+  OP::append_values l_commands OP::value_many OP::value ne "$l_sep" -- "$@"
+  OP::value eq "$l_sep" -- "$@"
+  local l_nt l_ns l_nc
+  let l_nt=${#l_targets[@]}+2
+  let l_ns=${#l_sources[@]}+2
+  let l_nc=${#l_commands[@]}+2
+  OP::lenarr_append RULES $l_nt :targets "${l_targets[@]}" \
+    $l_ns :sources "${l_sources[@]}" \
+    $l_nc :commands "${l_commands[@]}"
+  return 0
+}
+
+function file_make::source_values {
+  local OP_VALUES
+  "$@" || return 1
+  source "${OP_VALUES[@]}"
+}
+
+OP::add_help
+
+DEFINE_string rm "file_make::cmd_rm" "Command to remove file."
+
+DEFINE_string isfile "file_make::cmd_isfile" "Command to check file existence."
+
+DEFINE_string mtime "file_make::cmd_mtime" "Command to get mtime of file."
+
+DEFINE_string fileutil "" "The fileutil, a wrapper for all file commands of remote files."
+
+DEFINE_string wrapper "" "Wrapper for all commands."
+
+OP::add_option "--rule ..." \
+  "OP::func file_make::take_rule" \
+  "--rule TARGET... -- SOURCE... --SEP COMMAND... --SEP" \
+  "Add building rule."
+
+OP::add_config_file
+
+OP::add_option "--source FILE..." \
+  'file_make::source_values OP::value_many OP::value non-option --' \
+  'Source the file as bash.'
+
+OP::parse_all "$@"
+
+declare -A FILE_MTIMES
+
+declare -a rmfiles=()
+
+function exists() {
+  if [ "$2" != in ]; then
+    exit 2
+  fi
+  eval '[ ${'$3'[$1]+exist} ]'
+}
+
+function shard_pattern {
+  if [[ "$1" =~ '@' ]]; then
+    local n=$(echo "$1" | sed 's/.*@//')
+    echo -n "$1" | sed 's/@.*//'
+    echo -n "-?????-of-"
+    printf '%05d' $n
+  else
+    echo "$1"
+  fi
+}
+
+function file_make::cmd_mtime() {
+  local l_file="$1" l_time_str
+  if [[ -z "$FLAGS_fileutil" ]]; then
+    l_time_str="$(ls -l --full-time "$l_file" 2>/dev/null | sed 's/ \+/\t/g' | cut -f6,7)" || OP::fatal
+  else
+    l_time_str="$($FLAGS_fileutil ls -l --sharded "$l_file" 2>/dev/null | sed 's/ \+/\t/g' | cut -f6,7)" || OP::fatal
+  fi
+  if [[ -z "$l_time_str" ]]; then
+    echo 0
+  else
+    date -d "$l_time_str" +%s.%N
+  fi
+}
+
+# file_make::mtime variable file
+function file_make::mtime {
+  local -n l_name="$1"
+  local l_file="$(shard_pattern "$2")"
+  if exists $l_file in FILE_MTIMES; then
+    l_name=${FILE_MTIMES[$l_file]}
+    return
+  fi
+  local l_time=$($FLAGS_mtime "$l_file") || OP::fatal
+  FILE_MTIMES[$l_file]=$l_time
+  l_name=$l_time
+}
+
+function file_make::cmd_isfile {
+  local file="$1"
+  $FLAGS_fileutil test -f "$file"
+}
+
+function file_make::isfile {
+  local file="$(shard_pattern "$1")"
+  if exists $file in FILE_MTIMES; then
+    ! [[ ${FILE_MTIMES[$file]} == 0 ]]
+    return
+  fi
+  $FLAGS_isfile "$file"
+}
+
+function file_make::cmd_rm() {
+  $FLAGS_fileutil rm -f "$file"
+}
+
+function file_make::rm() {
+  local file="$(shard_pattern "$1")"
+  if exists $file in FILE_MTIMES && [[ ${FILE_MTIMES[$file]} == 0 ]]; then
+    return
+  fi
+ $FLAGS_rm "$file" || OP::fatal rm "$file" failed
+  FILE_MTIMES[$file]=0
+}
+
+# Used variables TARGETS SOURCES
+function file_make::deps_valid {
+  local -a l_sources
+  local l_f l_t l_s
+  for l_f in "${SOURCES[@]}"; do
+    file_make::mtime l_s "$l_f"
+    if [[ $l_s == 0 ]]; then
+      return 1
+    fi
+    l_sources+=( $l_s )
+  done
+  for l_f in "${TARGETS[@]}"; do
+    file_make::mtime l_t "$l_f"
+    for l_s in "${l_sources[@]}"; do
+      local l_r=$(echo "$l_s >= $l_t" | bc -l)
+      if [[ $l_r == 1 ]]; then
+        return 1
+      fi
+    done
+  done
+  return 0
+}
+
+function CheckFiles()  {
+  local l_n=0
+  local -a SOURCES TARGETS
+  while l_pos=$(OP::lenarr_next RULES $l_pos); do
+    OP::lenarr_getattr RULES $l_pos :sources SOURCES
+    OP::lenarr_getattr RULES $l_pos :targets TARGETS
+    if ! file_make::deps_valid; then
+      OP::error ${TARGETS[*]} : ${SOURCES[*]} is still invalid
+      let ++l_n
+    fi
+  done
+  return $l_n
+}
+
+function CleanOldFiles()  {
+  local -A l_cleaned
+  while true; do
+    local num_rm=0
+    local l_pos=0
+    while l_pos=$(OP::lenarr_next RULES $l_pos); do
+      if exists $l_pos in l_cleaned; then
+        continue
+      fi
+      local -a TARGETS
+      OP::lenarr_getattr RULES $l_pos :targets TARGETS
+      local -a SOURCES
+      OP::lenarr_getattr RULES $l_pos :sources SOURCES
+      if ! file_make::deps_valid; then
+        l_cleaned[$l_pos]=1
+        OP::info Clean ${TARGETS[@]}
+        for t in "${TARGETS[@]}"; do
+          if file_make::isfile "$t"; then
+            let ++num_rm
+            file_make::rm "$t"
+          fi
+        done
+      fi
+    done
+    if [[ $num_rm -eq 0 ]]; then
+      break
+    fi
+  done
+}
+
+function BuildFiles()  {
+  local -A l_built
+  while true; do
+    local num_built=${#l_built[@]}
+    local l_pos=0
+    while l_pos=$(OP::lenarr_next RULES $l_pos); do
+      if exists $l_pos in l_built; then
+        continue
+      fi
+      local -a SOURCES
+      OP::lenarr_getattr RULES $l_pos :sources SOURCES
+      local l_f l_t l_source_valid=1
+      for l_f in "${SOURCES[@]}"; do
+        file_make::mtime l_t "$l_f"
+        if [[ $l_t == 0 ]]; then
+          l_source_valid=0
+          break
+        fi
+      done
+      if [[ $l_source_valid == 0 ]]; then
+        continue
+      fi
+      local -a TARGETS
+      OP::lenarr_getattr RULES $l_pos :targets TARGETS
+      if file_make::deps_valid; then
+        continue
+      fi
+      for l_f in "${TARGETS[@]}"; do
+        file_make::rm "$l_f"
+      done
+      local -a COMMANDS
+      OP::lenarr_getattr RULES $l_pos :commands COMMANDS
+      OP::info Run rule ${TARGETS[@]} : ${SOURCES[@]}
+      $FLAGS_wrapper "${COMMANDS[@]}" || OP::fatal "command failed" $FLAGS_wrapper "${COMMANDS[@]}"
+      l_built[$l_pos]=1
+      for l_f in "${TARGETS[@]}"; do
+        unset FILE_MTIMES[$l_f]
+      done
+    done
+    if [[ $num_built -eq ${#l_built[@]} ]]; then
+      break
+    fi
+  done
+}
+
+CleanOldFiles
+
+BuildFiles
+
+CheckFiles

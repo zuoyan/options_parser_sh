@@ -1,5 +1,8 @@
 #!/bin/bash
-
+#
+# List the changed files by AUTHOR(default $USER), filter/filter-out using
+# regexps.
+#
 if [[ -f $(dirname $(realpath $0))/options_parser.sh ]]; then
   source $(dirname $(realpath $0))/options_parser.sh
 elif [[ -f $(dirname $0)/options_parser.sh ]]; then
@@ -14,23 +17,17 @@ declare -a REV_REGEXPS # filter out
 declare revision_range
 AUTHOR=${AUTHOR:-$USER}
 
-op_description="list the changed files by AUTHOR(default \$USER),
-filter/filter-out using regexps"
+OP::add_help
 
-OP_add_help
+OP::add_option "--revision-range <revision range>" "revision_range" "Only check files changed in revsion range"
 
-OP_add_option "revision-range" "revision_range" "<revision range>\n
-Only check files changed in revsion range"
+OP::add_option "--author AUTHOER" "AUTHOR" "set author name"
 
-OP_add_option "author" "AUTHOR" "NAME\nset author name"
+OP::add_option "--regexp REGEXP" "OP::append_values REGEXPS OP::values --" "add regexp to filter over commits"
 
-OP_add_option "regexp" "OP_take_append REGEXPS --" "REGEXP\nadd regexp
-to filter over commits"
+OP::add_option "--rev-regexp REGEXP" "OP::append_values REV_REGEXPS OP::values --" "add regexp to filter out over commits"
 
-OP_add_option "rev-regexp" "OP_take_append REV_REGEXPS --" "REGEXP\nadd
-regexp to filter out over commits"
-
-OP_parse_all "$@"
+OP::parse_all "$@"
 
 logs=$(git log --pretty=oneline --no-merges --author=$AUTHOR $revision_range | sed 's/ .*//')
 
